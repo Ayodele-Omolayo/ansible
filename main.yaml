@@ -1,0 +1,404 @@
+---
+- name: Deploy Node.js Express Application
+  hosts: hng
+  become: yes
+  vars:
+    app_dir: "/opt/stage_5b"
+    out_log: "/var/log/stage_5b/access.log"
+    error_log: "/var/log/stage_5b/error.log"
+    node_version: "18"  # or later version like "16.x" or "18.x"
+    rabbitmq_version: "3.9.8"
+    db_name: "mydatabase"
+    db_user: "myuser"
+    db_password: "your_secure_password"
+    pg_version: "14"
+    secret_file: "/var/secrets/pg_pw.txt"
+    nginx_version: "1.26.1"
+    pcre_version: "8.44"
+  environment:
+    NVM_DIR: "/home/ubuntu/.nvm"
+    PATH: "/home/ubuntu/.nvm/versions/node/{{ node_version }}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+  tasks:
+    - name: Create 'hng' user with sudo privileges
+      user:
+        name: hng
+        createhome: yes
+        groups: sudo
+        shell: /bin/bash
+
+    - name: Create directory for the project
+      file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: hng
+        group: hng
+        mode: '0755'
+
+    - name: Ensure Git safe directory
+      command: git config --global --add safe.directory "{{ app_dir }}"
+      become: yes
+      become_user: ubuntu
+      register: result
+      retries: 3
+      delay: 10
+      until: result.rc == 0
+
+    - name: Ensure correct ownership and permissions
+      file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        recurse: yes
+        mode: '0755'
+
+    - name: Ensure the system is updated
+      apt:
+        update_cache: yes
+
+    - name: Install prerequisites
+      apt:
+        name:
+          - build-essential
+          - curl
+          - software-properties-common
+        state: present
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install PCRE library
+      apt:
+        name:
+          - libpcre3
+          - libpcre3-dev
+        state: present
+
+    - name: Install OpenSSL library
+      apt:
+        name:
+          - libssl-dev
+        state: present
+
+    - name: Install zlib library
+      apt:
+        name:
+          - zlib1g-dev
+        state: present
+
+    - name: Download Nginx source code
+      get_url:
+        url: "https://nginx.org/download/nginx-{{ nginx_version }}.tar.gz"
+        dest: "/tmp/nginx-{{ nginx_version }}.tar.gz"
+
+    - name: Extract Nginx source code
+      unarchive:
+        src: "/tmp/nginx-{{ nginx_version }}.tar.gz"
+        dest: /tmp
+        remote_src: yes
+
+    - name: Configure Nginx build options
+      command: ./configure --sbin-path=/usr/bin/nginx --conf-path=/etc/nginx/nginx.conf --pid-path=/var/run/nginx.pid --lock-path=/var/lock/nginx.lock --with-http_ssl_module --with-pcre
+      args:
+        chdir: /tmp/nginx-{{ nginx_version }}
+
+    - name: Compile Nginx source code
+      command: make
+      args:
+        chdir: /tmp/nginx-{{ nginx_version }}
+
+    - name: Install Nginx
+      command: make install
+      args:
+        chdir: /tmp/nginx-{{ nginx_version }}
+
+    - name: Unmask the Nginx service
+      command: systemctl unmask nginx
+
+    - name: Create systemd service file for Nginx
+      copy:
+        dest: /lib/systemd/system/nginx.service
+        content: |
+          [Unit]
+          Description=A high performance web server and a reverse proxy server
+          After=network.target
+
+          [Service]
+          Type=forking
+          ExecStart=/usr/bin/nginx
+          ExecReload=/usr/bin/nginx -s reload
+          ExecStop=/usr/bin/nginx -s stop
+          PIDFile=/var/run/nginx.pid
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd to apply the new service file
+      command: systemctl daemon-reload
+
+    - name: Start Nginx service
+      systemd:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Verify Nginx version
+      command: /usr/bin/nginx -v
+      register: nginx_version
+      failed_when: "'1.26.1' not in nginx_version.stderr"
+      changed_when: false
+
+
+    - name: Add NodeSource repository for Node.js 18.x
+      shell: curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+      args:
+        executable: /bin/bash
+
+    - name: Install Node.js
+      apt:
+        name: nodejs
+        state: present
+
+    - name: Change ownership of the project directory
+      file:
+        path: /home/ubuntu/my-express-app
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        recurse: yes
+
+    - name: Install TypeScript globally
+      shell: npm install -g typescript
+      args:
+        executable: /bin/bash
+      become: yes
+
+
+    - name: Clone repository
+      git:
+        repo: https://github.com/hngprojects/hng_boilerplate_expressjs
+        dest: /opt/stage_5b
+        version: devops
+        force: true
+        update: true
+      become: yes
+      become_user: ubuntu
+
+    - name: Install Node.js dependencies
+      command: npm install --legacy-peer-deps
+      args:
+        chdir: "{{ app_dir }}"
+        executable: /bin/bash
+      become: yes
+
+
+
+    - name: Install ts-node-dev globally
+      shell: |
+        source /home/ubuntu/.nvm/nvm.sh
+        npm install -g ts-node-dev
+      args:
+        executable: /bin/bash
+      become: yes
+
+
+    - name: Initialize TypeScript configuration
+      shell: |
+        source /home/ubuntu/.nvm/nvm.sh
+        nvm use 14
+        cd /opt/stage_5b
+        npx tsc --init
+      args:
+        executable: /bin/bash
+      become: yes
+      become_user: ubuntu
+
+    - name: Install jq
+      apt:
+        name: jq
+        state: present
+      become: yes
+    - name: Create /etc/nginx/sites-available directory
+      file:
+        path: /etc/nginx/sites-available
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+
+    - name: Update package.json to add start script
+      shell: |
+        jq '.scripts.start = "ts-node-dev --respawn --transpile-only src/index.ts"' package.json > tmp.json && mv tmp.json package.json
+      args:
+        chdir: /opt/stage_5b
+        executable: /bin/bash
+      become: yes
+      become_user: ubuntu
+
+    - name: Install RabbitMQ
+      apt:
+        name: rabbitmq-server
+        state: present
+
+    - name: Enable and start RabbitMQ service
+      systemd:
+        name: rabbitmq-server
+        state: started
+        enabled: yes
+
+    - name: Install PostgreSQL and contrib package
+      apt:
+        name:
+          - postgresql
+          - postgresql-contrib
+        state: present
+
+    - name: Ensure /var/secrets directory exists
+      file:
+        path: /var/secrets
+        state: directory
+        mode: '0700'
+
+    - name: Save PostgreSQL admin user and credentials
+      copy:
+        content: |
+          DB_USER={{ db_user }}
+          DB_PASSWORD={{ db_password }}
+        dest: "{{ secret_file }}"
+        mode: '0600'
+
+    - name: Create PostgreSQL database
+      shell: |
+        if ! sudo -u postgres psql -lqt | cut -d \| -f 1 | grep -qw {{ db_name }}; then
+          sudo -u postgres psql -c "CREATE DATABASE {{ db_name }};"
+        fi
+      register: create_db
+      changed_when: create_db.stdout != ""
+
+    - name: Create PostgreSQL user
+      shell: |
+        if ! sudo -u postgres psql -c "\du" | cut -d \| -f 1 | grep -qw {{ db_user }}; then
+          sudo -u postgres psql -c "CREATE USER {{ db_user }} WITH PASSWORD '{{ db_password }}';"
+        fi
+      register: create_user
+      changed_when: create_user.stdout != ""
+
+    - name: Grant privileges to user
+      shell: sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE {{ db_name }} TO {{ db_user }};"
+      register: grant_privileges
+      changed_when: "'GRANT' in grant_privileges.stdout"
+
+    - name: Configure PostgreSQL to listen on all interfaces
+      lineinfile:
+        path: "/etc/postgresql/{{ pg_version }}/main/postgresql.conf"
+        regexp: "^#listen_addresses = 'localhost'"
+        line: "listen_addresses = '*'"
+        state: present
+
+    - name: Allow remote connections to PostgreSQL
+      lineinfile:
+        path: "/etc/postgresql/{{ pg_version }}/main/pg_hba.conf"
+        line: "host    all          all             0.0.0.0/0               md5"
+        state: present
+
+    - name: Restart PostgreSQL service
+      service:
+        name: postgresql
+        state: restarted
+
+    - name: Set environment variables for Node.js application
+      copy:
+        dest: "{{ app_dir }}/.env"
+        content: |
+          DB_HOST=localhost
+          DB_PORT=5432
+          DB_USER={{ db_user }}
+          DB_PASSWORD={{ db_password }}
+          DB_NAME={{ db_name }}
+
+
+    - name: Ensure logging directories exist
+      file:
+        path: /var/log/stage_5b
+        state: directory
+        owner: hng
+        group: hng
+        mode: '0755'
+
+    - name: Ensure log files exist and have correct permissions
+      file:
+        path: "{{ item }}"
+        state: touch
+        owner: hng
+        group: hng
+        mode: '0644'
+      loop:
+        - /var/log/stage_5b/out.log
+        - /var/log/stage_5b/error.log
+
+
+    - name: Configure Nginx to reverse proxy
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/stage_5b
+        content: |
+          server {
+              listen 80;
+              server_name 54.77.4.148;  # Replace with your server's domain name or IP address
+
+              location / {
+                  proxy_pass http://127.0.0.1:3000;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+              }
+
+              error_log {{ error_log }};
+              access_log {{ out_log }};
+          }
+      notify:
+        - Reload Nginx
+
+    - name: Enable Nginx site
+      file:
+        src: /etc/nginx/sites-available/stage_5b
+        dest: /etc/nginx/sites-enabled
+        state: link
+
+    - name: Reload Nginx to apply changes
+      service:
+        name: nginx
+        state: reloaded
+
+    - name: Configure log rotation
+      copy:
+        dest: /etc/logrotate.d/hng_boilerplate_nodejs_express
+        content: |
+          /var/log/stage_5b/*.log {
+              daily 
+              rotate 14
+              compress
+              delaycompress
+              missingok
+              notifempty
+              create 640 hng hng
+              sharedscripts
+              postrotate
+                  /usr/bin/killall -HUP hng_boilerplate_nodejs_express  # Adjust if needed
+              endscript
+          }
+      notify:
+        - Reload Logrotate
+
+  handlers:
+    - name: Reload Nginx
+      service:
+        name: nginx
+        state: reloaded
+
+    - name: Reload Logrotate
+      command: logrotate -f /etc/logrotate.d/hng_boilerplate_nodejs_express
